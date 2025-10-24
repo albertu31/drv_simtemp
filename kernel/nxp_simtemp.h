@@ -1,0 +1,11 @@
+#define INIT_TIME 500000000
+#define INIT_TEMP 0
+#define TEMP_STEP 1111
+#define ALERT_TEMP 50000
+#define RESET_TEMP 80000
+#define CERO_DEGREE 0
+#define NEW_SAMPLE_MASK  0x00000001
+#define TEMP_ALERT_MASK  0x00000002
+#define TEMP_ALERT_CLEAR 0x00000001
+
+static enum hrtimer_restart temp_timer_callback(struct hrtimer *timer);

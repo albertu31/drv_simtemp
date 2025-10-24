@@ -4,6 +4,11 @@
 #include <linux/types.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/hrtimer.h>
+#include <linux/workqueue.h>
+#include <linux/ktime.h>
+#include "nxp_simtemp.h"
+
 
 /*Driver struct*/
 struct simtemp_sample {
@@ -19,12 +24,74 @@ struct simtemp_drv{
     struct simtemp_sample *data;
 };
 
+__u64 time_sample;    // Time for each temperature sample
+
 /*Global pointer for acess driver*/
 static struct simtemp_drv *global_simtemp = NULL;
 
 /* Temp variable to simulate a device, if DTS is avaibale is not necessary kernel will create it*/
-static struct platform_device *tmp_simtemp;
+static struct platform_device *tmp_simtemp = NULL;
 
+/*High resolution timer to simulate temperature */
+static struct hrtimer temp_timer;
+
+/*Pointer for the queue with all the task*/
+static struct workqueue_struct *simtemp_queue = NULL;
+
+/*Struct to be queue */
+static struct work_struct temperaure_work;
+
+/*Variable to validate if temperatures was read*/
+bool temp_done = true;
+
+/*Function to be run in the queue*/
+static void temperature_read(struct work_struct *work)
+{
+    ktime_t time_read = ktime_get();
+
+    /* Update data data for sensor */
+    global_simtemp->data->temp_mC += (__s32)TEMP_STEP;
+    global_simtemp->data->timestamp_ns = ktime_to_ns(time_read);
+    global_simtemp->data->flags |= NEW_SAMPLE_MASK; 
+
+    /* Set flag if temperature is above 50° */
+    if(ALERT_TEMP < global_simtemp->data->temp_mC)
+    {
+        global_simtemp->data->flags |= TEMP_ALERT_MASK; 
+
+        /* Reset temperature to avoid burning*/
+        if(RESET_TEMP < global_simtemp->data->temp_mC)
+        {
+            global_simtemp->data->temp_mC = (__s32)CERO_DEGREE;
+            global_simtemp->data->flags &= TEMP_ALERT_CLEAR; 
+        }
+    }
+
+    pr_info("Time: %llu \n", global_simtemp->data->timestamp_ns);
+    pr_info("Temperature: %d\n", global_simtemp->data->temp_mC);
+    pr_info("Flags: %d\n", global_simtemp->data->flags);
+
+    temp_done = true;
+}
+
+/*Function call during interruption period, restart timer*/
+static enum hrtimer_restart temp_timer_callback(struct hrtimer *timer)
+{
+    if(temp_done) 
+    {
+        /*Add temperature_work to the queue*/
+        queue_work(simtemp_queue, &temperaure_work);
+        temp_done = false;
+    } 
+    else 
+    {
+        pr_info("Temperature work pending to run");
+    }
+
+    /*Restart timer*/
+    hrtimer_forward_now(timer, time_sample);
+    return HRTIMER_RESTART;
+}
 
 /*Probe function*/
 static int simtemp_probe(struct platform_device *client) 
@@ -37,11 +104,34 @@ static int simtemp_probe(struct platform_device *client)
         dev_err(&client->dev, "Error Memory Assigment\n");
         return -ENOMEM;  // o el código de error apropiado
     }
-    else
+
+    global_simtemp->data = devm_kzalloc(&client->dev, sizeof(*global_simtemp->data), GFP_KERNEL);
+
+    /*Handle error with Memory assigment*/
+    if(!global_simtemp->data) 
     {
-        pr_info("Platform device added: %s\n", client->name);
-        return 0; 
+        dev_err(&client->dev, "Error Memory Assigment\n");
+        return -ENOMEM;  // o el código de error apropiado
     }
+
+    pr_info("Platform device added: %s\n", client->name);
+        
+    /*Create the queue list*/
+    simtemp_queue = create_singlethread_workqueue("simtemp_queue");
+    /*Assignt function to struct*/
+    INIT_WORK(&temperaure_work, temperature_read);
+
+    /*Assignt value to counter variable*/
+    time_sample = ktime_set(0, INIT_TIME);
+    /*Assignt kind of timer*/
+    hrtimer_init(&temp_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    /*Assignt callback function to timer*/
+    temp_timer.function = temp_timer_callback;
+    /*Start timer to count*/
+    hrtimer_start(&temp_timer, time_sample, HRTIMER_MODE_REL);
+
+    return 0; 
+
 }
 
 /*Remove function*/
@@ -93,6 +183,7 @@ static int __init simtemp_init(void)
             platform_driver_unregister(&simtemp_driver);
             return PTR_ERR(tmp_simtemp);
         }
+
     }
 
     return 0;
@@ -101,6 +192,14 @@ static int __init simtemp_init(void)
 /* Exit function: unregister both */
 static void __exit simtemp_exit(void)
 {
+    /*Delete timer*/
+    int ret = hrtimer_cancel(&temp_timer);
+    pr_info("hrtimer cancelado (%d)\n", ret);
+    /*Clear works in the queue*/
+    flush_workqueue(simtemp_queue); 
+    /*Delete queue*/
+    destroy_workqueue(simtemp_queue);
+
     pr_info("Module removed\n");
     platform_device_unregister(tmp_simtemp);
     platform_driver_unregister(&simtemp_driver);
@@ -113,4 +212,3 @@ module_exit(simtemp_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Alberto Rodriguez");
 MODULE_DESCRIPTION("Platform driver to simulate temperature values");
-
