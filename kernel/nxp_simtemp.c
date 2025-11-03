@@ -81,11 +81,7 @@ static void temperature_update(struct work_struct *work)
             global_simtemp->data->flags &= TEMP_ALERT_CLEAR; 
         }
     }
-
-    pr_info("Time: %llu \n", global_simtemp->data->timestamp_ns);
-    pr_info("Temperature: %d\n", global_simtemp->data->temp_mC);
-    pr_info("Flags: %d\n", global_simtemp->data->flags);
-
+    
     temp_done = true;
 }
 
@@ -131,6 +127,8 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     struct simtemp_sample sample_userspace;
     ssize_t count_data;
 
+    count_data = sizeof(sample_userspace);
+
     /* Sleep function until new sample */
     if(wait_event_interruptible(simtemp_qwait, global_simtemp->data->flags & NEW_SAMPLE_MASK))
     {
@@ -149,7 +147,7 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     mutex_unlock(&simtemp_lock);
 
     /* Validate size of buf using count*/
-    if(count < sizeof(sample_userspace))
+    if(count < count_data)
     {
         return -EINVAL;
     }
@@ -160,16 +158,62 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
         return -EFAULT;
     }
 
-    count_data = sizeof(sample_userspace);
+    return count_data;
+}
 
+static ssize_t simtemp_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+    ssize_t count_data;
+    __u64 time_sample_write;
+    static bool init_done = false;
+
+    count_data = sizeof(time_sample_write);
+
+    /*Validate size of data*/
+    if( count < count_data)
+    {
+        return 0;
+    }
+
+    /*Copy new time from user space to driver variable */
+    if(copy_from_user(&time_sample_write, buf, count_data))
+    {
+         return -EFAULT;  
+    }
+
+    if(!init_done)
+    {
+        /*Create the queue list*/
+        simtemp_queue = create_singlethread_workqueue("simtemp_queue");
+        /*Assignt function to struct*/
+        INIT_WORK(&temperaure_work, temperature_update);
+
+        /*Assignt value to counter variable*/
+        time_sample = ktime_set(0, time_sample_write);
+        /*Assignt kind of timer*/
+        hrtimer_init(&temp_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+        /*Assignt callback function to timer*/
+        temp_timer.function = temp_timer_callback;
+        /*Start timer to count*/
+        hrtimer_start(&temp_timer, time_sample, HRTIMER_MODE_REL);
+
+        init_done = true;
+    }
+    else
+    {
+        time_sample = ktime_set(0, time_sample_write);
+    }
+    
+    /*Return number of bytes written*/
     return count_data;
 }
 
 
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
-    .read = simtemp_read,
     .poll = simtemp_poll,
+    .read = simtemp_read,
+    .write = simtemp_write,
 };
 
 /*Probe function*/
@@ -195,20 +239,6 @@ static int simtemp_probe(struct platform_device *client)
 
     pr_info("Platform device added: %s\n", client->name);
         
-    /*Create the queue list*/
-    simtemp_queue = create_singlethread_workqueue("simtemp_queue");
-    /*Assignt function to struct*/
-    INIT_WORK(&temperaure_work, temperature_update);
-
-    /*Assignt value to counter variable*/
-    time_sample = ktime_set(0, INIT_TIME);
-    /*Assignt kind of timer*/
-    hrtimer_init(&temp_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-    /*Assignt callback function to timer*/
-    temp_timer.function = temp_timer_callback;
-    /*Start timer to count*/
-    hrtimer_start(&temp_timer, time_sample, HRTIMER_MODE_REL);
-
     return 0; 
 
 }
